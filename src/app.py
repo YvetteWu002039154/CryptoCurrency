@@ -13,7 +13,8 @@ from models.UTXO import UTXO
 import models.Block as Block
 
 # 01 Importing Flask and JSONify Modules
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, make_response
+from flask_cors import CORS
 
 import logging
 
@@ -23,7 +24,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('blockchain.log'),
-        logging.StreamHandler()  # This will also print to console
+        logging.StreamHandler()
     ]
 )
 
@@ -32,12 +33,25 @@ logger = logging.getLogger(__name__)
 
 def create_app(port):
     app = Flask(__name__)
+    
+    # Enable CORS for all routes
+    @app.after_request
+    def after_request(response):
+        response.headers.add('Access-Control-Allow-Origin', 'http://localhost:3000')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        return response
+
     blockChain = BlockChain()
 
     # Part - 00 Add transactions to the mempool (Users can trade and add their transaction into mempool)
 
-    @app.route('/generate_keys', methods=['GET'])
+    @app.route('/wallet/generate', methods=['GET', 'OPTIONS'])
     def generate_keys():
+        if request.method == 'OPTIONS':
+            return make_response()
+            
         try:
             # Generate new key pair
             private_key_bytes, public_key_bytes = generate_key_pair()
@@ -46,15 +60,16 @@ def create_app(port):
             address = blockChain.generate_address(public_key_bytes)
             
             response = {
-                'private_key': private_key_bytes.hex(),  # Convert to hex for JSON response
-                'public_key': public_key_bytes.hex(),    # Convert to hex for JSON response
+                'private_key': private_key_bytes.hex(),
+                'public_key': public_key_bytes.hex(),
                 'address': address
             }
             return jsonify(response), 200
         except Exception as e:
-            return f'Error generating keys: {str(e)}', 500
+            logger.error(f"Error generating keys: {str(e)}")
+            return jsonify({'error': str(e)}), 500
         
-    @app.route('/prepare_transaction', methods=['POST'])
+    @app.route('/transaction/prepare', methods=['POST'])
     def prepare_transaction():
         json = request.get_json()
         logger.info(f"Received prepare_transaction request: {json}")
@@ -157,7 +172,7 @@ def create_app(port):
             logger.error(f"Error preparing transaction: {str(e)}", exc_info=True)
             return f'Error preparing transaction: {str(e)}', 400
 
-    @app.route('/add_transaction', methods=['POST'])
+    @app.route('/transaction/add', methods=['POST'])
     def add_transaction():
         json = request.get_json()
         logger.info(f"Received add_transaction request: {json}")
@@ -206,7 +221,7 @@ def create_app(port):
             logger.error(f"Error processing transaction: {str(e)}", exc_info=True)
             return f'Error processing transaction: {str(e)}', 400
 
-    @app.route('/get_mempool', methods=['GET'])
+    @app.route('/transaction/get_mempool', methods=['GET'])
     def get_mempool():
         try:
             # Convert each transaction in the mempool to a dictionary format
@@ -248,13 +263,19 @@ def create_app(port):
             return f'Error retrieving mempool: {str(e)}', 500
     # Part - 01 Mining a Block (Miners can mine a block and add it to the blockchain)
 
-    @app.route('/mine_block', methods=['POST'])
+    @app.route('/block/mine', methods=['POST'])
     def mine_block():
         json = request.get_json()
         if not json or 'miner_address' not in json:
             return 'Miner address is required', 400
 
         miner_address = json['miner_address']
+
+        # Check if there are any transactions in the mempool
+        if not blockChain.mempool:
+            return jsonify({
+                'error': 'No transactions in mempool. Mining empty blocks is not allowed.'
+            }), 400
 
         previous_block = blockChain.get_previous_block().to_dict()
         previous_proof = previous_block['proof']
@@ -275,7 +296,7 @@ def create_app(port):
         }
         return jsonify(response), 200
 
-    @app.route('/get_chain', methods=['GET'])
+    @app.route('/chain/get', methods=['GET'])
     def get_chain():
         response = {
             'chain': [block.to_dict() for block in blockChain.chain],
@@ -283,7 +304,7 @@ def create_app(port):
         }
         return jsonify(response), 200
     
-    @app.route('/validate_chain', methods=['GET'])
+    @app.route('/chain/validate', methods=['GET'])
     def validate_blockChain():
         is_valid = blockChain.is_chain_valid(blockChain.chain)
         if is_valid:
@@ -296,8 +317,22 @@ def create_app(port):
         }
         return jsonify(response), 500
 
+    @app.route('/wallet/balance/<address>', methods=['GET'])
+    def get_wallet_balance(address):
+        try:
+            balance = blockChain.get_balance(address)
+            response = {
+                'address': address,
+                'balance': balance
+            }
+            return jsonify(response), 200
+            
+        except Exception as e:
+            logger.error(f"Error getting wallet balance: {str(e)}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+
     # Part - 02 Connecting to other nodes (New miners can connect to the network)
-    @app.route('/connect_node', methods = ['POST'])
+    @app.route('/node/connect', methods = ['POST'])
     def connect_node():
         json = request.get_json()
         nodes = json.get('nodes')
@@ -309,7 +344,7 @@ def create_app(port):
                     'total_nodes': list(blockChain.nodes)}
         return jsonify(response), 201
 
-    @app.route('/replace_chain', methods = ['GET'])
+    @app.route('/node/sync', methods = ['GET'])
     def replace_chain():
         is_chain_replaced = blockChain.replace_chain()
         if is_chain_replaced:
@@ -327,5 +362,5 @@ def create_app(port):
     return app
 
 if __name__ == '__main__':
-    app = create_app(5003)
-    app.run(host='0.0.0.0', port=5003)
+    app = create_app(5000)
+    app.run()
